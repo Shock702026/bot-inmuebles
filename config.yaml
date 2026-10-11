@@ -1,0 +1,64 @@
+# ==========================================================
+#  Configuración del bot de inmuebles
+#  Editá este archivo para cambiar lo que busca el bot.
+# ==========================================================
+
+filtros:
+  precio_max_usd: 200000      # precio máximo en dólares
+  dormitorios_min: 2          # mínimo de dormitorios
+  # Si un aviso no indica dormitorios, ¿avisar igual? (true = sí)
+  avisar_si_no_indica_dormitorios: true
+  # Cotización aproximada para avisos publicados en pesos uruguayos
+  cotizacion_usd_uyu: 40
+
+# Tipos de inmueble a buscar: casas, apartamentos
+tipos:
+  - casas
+  - apartamentos
+
+# ----------------------------------------------------------
+#  Zonas por departamento.
+#  - Escribí los barrios/zonas con su nombre normal (con o sin tildes).
+#  - Lista vacía [] = todo el departamento.
+# ----------------------------------------------------------
+zonas:
+  montevideo:
+    - Parque Rodó
+    - Cordón Sur
+    - Barrio Sur
+    - Palermo
+    - Prado
+    - Atahualpa
+    - Reducto
+    - Pocitos
+    - Punta Carretas
+  maldonado:
+    - Punta del Este
+    - Punta Ballena
+    - Lausana
+    - Chihuahua
+    - Portezuelo
+    - Sauce de Portezuelo
+    - Solanas
+    - Laguna del Sauce
+    - Ocean Park
+
+# Portales donde buscar (borrá una línea para dejar de usar ese portal)
+portales:
+  - casasymas
+  - mercadolibre
+  - infocasas
+  - gallito
+
+# Máximo de avisos que se mandan por Telegram en cada revisión.
+# Si hay más, el resto llega en la revisión siguiente.
+max_mensajes_por_ejecucion: 25
+
+# ----------------------------------------------------------
+#  (Opcional) Búsquedas extra con URLs copiadas del navegador.
+#  Útil si un portal usa otro nombre para un barrio.
+#  Formato:
+#    gallito:
+#      - https://www.gallito.com.uy/...
+# ----------------------------------------------------------
+busquedas_extra: {}
