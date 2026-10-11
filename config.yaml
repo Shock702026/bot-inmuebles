@@ -46,9 +46,9 @@ zonas:
 # Portales donde buscar (borrá una línea para dejar de usar ese portal)
 portales:
   - casasymas
-  - mercadolibre
   - infocasas
   - gallito
+  - remax
 
 # Máximo de avisos que se mandan por Telegram en cada revisión.
 # Si hay más, el resto llega en la revisión siguiente.

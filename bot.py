@@ -34,6 +34,7 @@ SITE_NAMES = {
     "mercadolibre": "Mercado Libre",
     "infocasas": "InfoCasas",
     "gallito": "Gallito",
+    "remax": "RE/MAX",
 }
 
 # Cómo reconocer el link de un aviso en cada portal (grupo 1 = id del aviso)
@@ -42,7 +43,12 @@ LINK_PATTERNS = {
     "mercadolibre": re.compile(r"mercadolibre\.com\.uy/.*?(MLU-?\d{6,})", re.I),
     "infocasas": re.compile(r"infocasas\.com\.uy/[\w\-]+/(\d{5,})(?:[/?#]|$)"),
     "gallito": re.compile(r"gallito\.com\.uy/[\w\-]+-inmuebles-(\d+)"),
+    "remax": re.compile(r"remax\.com\.uy/listings/(?!buy\b|rent\b)([a-z0-9][a-z0-9\-]{8,})", re.I),
 }
+
+# Portales que solo tienen páginas por ciudad (no por barrio). En estos el
+# aviso tiene que nombrar uno de los barrios elegidos para que te llegue.
+SOLO_CIUDAD = {"remax"}
 
 
 # ----------------------------------------------------------------------------
@@ -107,8 +113,10 @@ def _contains(text_n: str, name_n: str) -> bool:
     return re.search(rf"(?<![a-z]){re.escape(name_n)}(?![a-z])", text_n) is not None
 
 
-def zona_ok(text: str, depto: str, elegidas: list[str]) -> bool:
-    """True si la tarjeta corresponde a una zona elegida (o no dice zona)."""
+def zona_ok(text: str, depto: str, elegidas: list[str], estricto: bool = False) -> bool:
+    """True si la tarjeta corresponde a una zona elegida.
+    estricto=False: también acepta tarjetas que no nombran ningún barrio
+    (la búsqueda ya era de ese barrio). estricto=True: exige nombrarlo."""
     if not elegidas:
         return True
     t = norm(text)
@@ -119,8 +127,19 @@ def zona_ok(text: str, depto: str, elegidas: list[str]) -> bool:
         buscadas.update(ALIAS.get(zn, []))
     if any(_contains(t, b) for b in buscadas):
         return True
+    if estricto:
+        return False
     otras = [o for o in CONOCIDAS.get(depto, []) if o not in buscadas]
     return not any(_contains(t, o) for o in otras)
+
+
+def detectar_depto(text: str, deptos: list[str]) -> str:
+    """Para búsquedas de todo el país: deduce el departamento del aviso."""
+    t = norm(text)
+    for d in deptos:
+        if _contains(t, d) or (d == "maldonado" and _contains(t, "punta del este")):
+            return d
+    return ""
 
 
 # ----------------------------------------------------------------------------
@@ -141,7 +160,30 @@ def build_url(site: str, tipo: str, depto: str, zona: str | None, precio_max: in
         return f"https://www.infocasas.com.uy/venta/{tipo}/{d}{z}"
     if site == "gallito":
         return f"https://www.gallito.com.uy/inmuebles/{tipo}/venta/{d}{z}"
+    if site == "remax":
+        return f"https://www.remax.com.uy/{tipo}-en-venta-en-{d}"
     raise ValueError(site)
+
+
+def _ciudad_searches(site: str, cfg: dict, precio_max: int) -> list[dict]:
+    """Búsquedas para portales sin páginas por barrio (RE/MAX)."""
+    out = []
+    deptos = [norm(d) for d in (cfg.get("zonas") or {})]
+    for depto in deptos:
+        ciudades = [depto]
+        zonas_n = [norm(z) for z in (cfg["zonas"].get(depto) or cfg["zonas"].get(depto.title()) or [])]
+        if depto == "maldonado" and (not zonas_n or "punta del este" in zonas_n):
+            ciudades.append("punta del este")
+        for ciudad in ciudades:
+            for tipo in cfg.get("tipos") or ["casas", "apartamentos"]:
+                out.append({"site": site, "depto": depto, "zona": None, "estricto": True,
+                            "url": build_url(site, tipo, ciudad, None, precio_max)})
+    if site == "remax":
+        # Las 100 publicaciones de venta más recientes de todo el país.
+        out.append({"site": site, "depto": "", "zona": None, "estricto": True,
+                    "url": "https://www.remax.com.uy/listings/buy?page=0&pageSize=100"
+                           "&sort=-id&in:operationId=1"})
+    return out
 
 
 def build_searches(cfg: dict) -> list[dict]:
@@ -151,6 +193,9 @@ def build_searches(cfg: dict) -> list[dict]:
     for site in cfg.get("portales") or list(SITE_NAMES):
         if site not in LINK_PATTERNS:
             print(f"[!] Portal desconocido en config.yaml: {site}")
+            continue
+        if site in SOLO_CIUDAD:
+            out.extend(_ciudad_searches(site, cfg, precio_max))
             continue
         for depto, zonas in (cfg.get("zonas") or {}).items():
             depto_n = norm(depto)
@@ -290,6 +335,7 @@ async def _scrape_one(ctx, sem, search: dict) -> list[dict]:
                 "text": r["text"],
                 "depto": search["depto"],
                 "zona_busqueda": search["zona"],
+                "estricto": search.get("estricto", False),
             })
     print(f"  {SITE_NAMES[site]}: {len(items)} avisos en {search['url']}")
     return items
@@ -322,20 +368,32 @@ def scrape(searches: list[dict]) -> list[dict]:
 # ----------------------------------------------------------------------------
 # Telegram
 # ----------------------------------------------------------------------------
+def chat_ids() -> list[str]:
+    """TELEGRAM_CHAT_ID admite varios Id separados por coma: 123,456"""
+    return [c.strip() for c in os.environ["TELEGRAM_CHAT_ID"].split(",") if c.strip()]
+
+
+def _send_one(token: str, chat_id: str, text: str) -> None:
+    for _ in range(3):
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                  "disable_web_page_preview": False},
+            timeout=30,
+        )
+        if r.status_code == 429:  # demasiados mensajes: esperar y reintentar
+            time.sleep(r.json().get("parameters", {}).get("retry_after", 5) + 1)
+            continue
+        if not r.ok:
+            print(f"  [!] No se pudo enviar a {chat_id}: {r.status_code} {r.text[:200]}")
+        return
+
+
 def send_telegram(text: str) -> None:
     token = os.environ["TELEGRAM_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    r = requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        json={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
-              "disable_web_page_preview": False},
-        timeout=30,
-    )
-    if r.status_code == 429:  # demasiados mensajes: esperar y reintentar
-        time.sleep(r.json().get("parameters", {}).get("retry_after", 5) + 1)
-        return send_telegram(text)
-    r.raise_for_status()
-    time.sleep(1.1)
+    for cid in chat_ids():
+        _send_one(token, cid, text)
+        time.sleep(1.1)
 
 
 def format_item(item: dict) -> str:
@@ -373,6 +431,9 @@ def main() -> None:
     seen: set[str] = set() if first_run else set(json.loads(SEEN_FILE.read_text()))
 
     searches = build_searches(cfg)
+    # Portales que todavía no tienen nada en la memoria = recién agregados.
+    sin_memoria = set() if first_run else {
+        s["site"] for s in searches if not any(x.startswith(s["site"] + ":") for x in seen)}
     print(f"Revisando {len(searches)} búsquedas...")
     items = scrape(searches)
 
@@ -382,7 +443,16 @@ def main() -> None:
             continue
         it["precio_usd"] = parse_price_usd(it["text"], f["cotizacion_usd_uyu"])
         it["dormitorios"] = parse_dorms(it["text"])
-        if passes_filters(it, f) and zona_ok(it["text"], it["depto"], zonas.get(it["depto"], [])):
+        if not it["depto"]:
+            it["depto"] = detectar_depto(it["text"], list(zonas))
+        en_zona = bool(it["depto"]) and zona_ok(
+            it["text"], it["depto"], zonas.get(it["depto"], []), it.get("estricto", False))
+        if en_zona and not it.get("zona_busqueda"):
+            t = norm(it["text"])
+            it["zona_busqueda"] = next(
+                (z for z in zonas.get(it["depto"], [])
+                 if any(_contains(t, a) for a in [norm(z), *ALIAS.get(norm(z), [])])), None)
+        if passes_filters(it, f) and en_zona:
             nuevos.append(it)
         else:
             seen.add(it["id"])
@@ -402,6 +472,17 @@ def main() -> None:
             "Desde ahora te aviso solo de los nuevos."
         )
     else:
+        # Portal recién agregado: registra sus avisos actuales sin mandarlos.
+        sitios_nuevos = sin_memoria & {i["sitio"] for i in items}
+        for s in sorted(sitios_nuevos):
+            de_s = [n for n in nuevos if n["sitio"] == s]
+            seen.update(n["id"] for n in de_s)
+            seen.update(i["id"] for i in items if i["sitio"] == s)
+            send_telegram(f"➕ Sumé <b>{html.escape(SITE_NAMES[s])}</b>: registré "
+                          f"{len(de_s)} avisos que ya cumplen tus filtros. "
+                          "Desde ahora te aviso de los nuevos.")
+        nuevos = [n for n in nuevos if n["sitio"] not in sitios_nuevos]
+
         limite = cfg.get("max_mensajes_por_ejecucion", 25)
         for it in nuevos[:limite]:
             send_telegram(format_item(it))
