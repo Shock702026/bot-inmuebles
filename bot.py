@@ -35,6 +35,7 @@ SITE_NAMES = {
     "infocasas": "InfoCasas",
     "gallito": "Gallito",
     "remax": "RE/MAX",
+    "pbi": "Punta Ballena Inmobiliaria",
 }
 
 # Cómo reconocer el link de un aviso en cada portal (grupo 1 = id del aviso)
@@ -49,6 +50,14 @@ LINK_PATTERNS = {
 # Portales que solo tienen páginas por ciudad (no por barrio). En estos el
 # aviso tiene que nombrar uno de los barrios elegidos para que te llegue.
 SOLO_CIUDAD = {"remax"}
+
+# Inmobiliarias con una sola página de ventas (se recorren todas sus páginas).
+# El departamento indica dónde están sus propiedades, para el filtro de zonas.
+INMOBILIARIAS = {
+    "pbi": {"url": "https://pbiinmobiliaria.com/ventas", "depto": "maldonado"},
+}
+LINK_PATTERNS["pbi"] = re.compile(
+    r"(?:pbiinmobiliaria|puntaballenainmobiliaria)\.com(?::\d+)?/(?:Casa|Apartamento)/(\d+)", re.I)
 
 
 # ----------------------------------------------------------------------------
@@ -72,8 +81,10 @@ ALIAS = {
         "beverly hills", "el jaguel", "lugano",
     ],
     "pocitos": ["pocitos nuevo"],
-    "punta ballena": ["las grutas"],
+    "punta ballena": ["las grutas", "lomo de la ballena", "club del lago",
+                      "tio tom", "rinconada", "sierra de la ballena"],
     "laguna del sauce": ["la laguna del sauce"],
+    "solanas": ["solana"],
 }
 
 # Barrios/zonas conocidos de cada departamento. Si la tarjeta de un aviso
@@ -197,6 +208,12 @@ def build_searches(cfg: dict) -> list[dict]:
         if site in SOLO_CIUDAD:
             out.extend(_ciudad_searches(site, cfg, precio_max))
             continue
+        if site in INMOBILIARIAS:
+            inm = INMOBILIARIAS[site]
+            if inm["depto"] in [norm(d) for d in (cfg.get("zonas") or {})]:
+                out.append({"site": site, "depto": inm["depto"], "zona": None,
+                            "url": inm["url"], "paginas": True})
+            continue
         for depto, zonas in (cfg.get("zonas") or {}).items():
             depto_n = norm(depto)
             for tipo in cfg.get("tipos") or ["casas", "apartamentos"]:
@@ -283,11 +300,18 @@ EXTRACT_JS = r"""
     const href = a.href;
     if (!rx.test(href)) continue;
     // Subir hasta la "tarjeta" del aviso para leer precio, dormitorios, zona.
+    // La tarjeta termina antes de abarcar el link de OTRO aviso.
+    const id = (href.match(rx) || [])[1];
     let card = a, best = a;
     for (let i = 0; i < 7 && card.parentElement; i++) {
       card = card.parentElement;
       const t = (card.innerText || '').trim();
       if (t.length > 2000) break;
+      const otro = [...card.querySelectorAll('a[href]')].some(x => {
+        const m = x.href.match(rx);
+        return m && m[1] !== id;
+      });
+      if (otro) break;
       best = card;
       if (/(U\$S|US\$|USD|\$)/.test(t) && t.length > 60) break;
     }
@@ -296,6 +320,28 @@ EXTRACT_JS = r"""
     out.push({ href, title: title.trim(), text: (best.innerText || '').trim() });
   }
   return out;
+}
+"""
+
+MAX_PAGINAS = 20
+
+# Links a las páginas siguientes de un listado (2, 3, ..., "Siguiente").
+PAGINAS_JS = r"""
+(base) => {
+  const b = new URL(base);
+  const out = new Set();
+  for (const a of document.querySelectorAll('a[href]')) {
+    let u;
+    try { u = new URL(a.href); } catch (e) { continue; }
+    if (u.host !== b.host || !u.pathname.toLowerCase().startsWith(b.pathname.toLowerCase())) continue;
+    const txt = (a.innerText || '').trim().toLowerCase();
+    const pag = /(pag|page|p)[=\/_-]?\d+/i.test(u.pathname + u.search);
+    if (pag || /^\d{1,3}$/.test(txt) || /siguiente|next|›|»/.test(txt)) {
+      u.hash = '';
+      if (u.href !== b.href) out.add(u.href);
+    }
+  }
+  return [...out];
 }
 """
 
@@ -308,19 +354,31 @@ async def _scrape_one(ctx, sem, search: dict) -> list[dict]:
     pattern = LINK_PATTERNS[site]
     async with sem:
         page = await ctx.new_page()
+        raw = []
+        pendientes, visitadas = [search["url"]], set()
         try:
-            await page.goto(search["url"], wait_until="domcontentloaded", timeout=45000)
-            try:
-                await page.wait_for_load_state("networkidle", timeout=8000)
-            except Exception:
-                pass
-            for _ in range(4):  # scroll para cargar avisos perezosos
-                await page.mouse.wheel(0, 3000)
-                await page.wait_for_timeout(500)
-            raw = await page.evaluate(EXTRACT_JS, pattern.pattern)
+            while pendientes and len(visitadas) < MAX_PAGINAS:
+                url = pendientes.pop(0)
+                if url in visitadas:
+                    continue
+                visitadas.add(url)
+                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass
+                for _ in range(4):  # scroll para cargar avisos perezosos
+                    await page.mouse.wheel(0, 3000)
+                    await page.wait_for_timeout(500)
+                raw += await page.evaluate(EXTRACT_JS, pattern.pattern)
+                if search.get("paginas"):
+                    for u in await page.evaluate(PAGINAS_JS, search["url"]):
+                        if u not in visitadas and u not in pendientes:
+                            pendientes.append(u)
         except Exception as e:
             print(f"  [!] {SITE_NAMES[site]}: no se pudo leer {search['url']}: {e}")
-            return []
+            if not raw:
+                return []
         finally:
             await page.close()
     items = []

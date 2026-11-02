@@ -49,6 +49,7 @@ portales:
   - infocasas
   - gallito
   - remax
+  - pbi            # Punta Ballena Inmobiliaria
 
 # Máximo de avisos que se mandan por Telegram en cada revisión.
 # Si hay más, el resto llega en la revisión siguiente.
