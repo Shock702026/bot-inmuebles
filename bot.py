@@ -434,6 +434,84 @@ def scrape(searches: list[dict]) -> list[dict]:
 
 
 # ----------------------------------------------------------------------------
+# Garage / cochera (se mira la ficha de cada aviso nuevo)
+# ----------------------------------------------------------------------------
+_G = r"(?:garages?|garajes?|cocheras?|estacionamientos?|parkings?)"
+GARAGE_NO = [
+    re.compile(rf"\bsin {_G}"),
+    re.compile(rf"\bno (?:tiene|posee|cuenta con|incluye) {_G}"),
+    re.compile(rf"\b{_G}\s*:?\s*(?:no\b|0\b|-)"),
+]
+GARAGE_SI = [
+    re.compile(rf"\b([1-9])\s*{_G}"),                       # "1 garage", "2 cocheras"
+    re.compile(rf"\b{_G}\s*:?\s*(?:[1-9]\b|si\b|[1-9](?!\d))"),  # "Garage: 1", "Garage1", "Cochera: Sí"
+    re.compile(rf"\bcon {_G}"),                              # "con garage"
+    re.compile(rf"\b{_G} (?:propio|cerrado|techado|cubierto|privado|doble|"
+               r"para \w+|incluido|individual|subterraneo|en (?:el )?edificio)"),
+]
+
+
+def detectar_garage(texto: str) -> bool | None:
+    """True = tiene garage/cochera, False = dice que no, None = no lo menciona."""
+    t = norm(texto)
+    if any(r.search(t) for r in GARAGE_SI):
+        return True
+    if any(r.search(t) for r in GARAGE_NO):
+        return False
+    return None
+
+
+FICHA_JS = r"""
+() => {
+  const m = document.querySelector('main, article, [class*=detail], [class*=Detail], [class*=propiedad]');
+  return ((m && m.innerText.length > 300 ? m.innerText : document.body.innerText) || '').slice(0, 30000);
+}
+"""
+
+
+async def _ficha_garage(ctx, sem, item: dict) -> None:
+    async with sem:
+        page = await ctx.new_page()
+        try:
+            await page.goto(item["url"], wait_until="domcontentloaded", timeout=45000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass
+            item["garage"] = detectar_garage(await page.evaluate(FICHA_JS))
+        except Exception as e:
+            print(f"  [!] No se pudo abrir la ficha {item['url']}: {e}")
+            item["garage"] = "error"
+        finally:
+            await page.close()
+
+
+async def _revisar_garages(items: list[dict]) -> None:
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        ctx = await browser.new_context(
+            locale="es-UY", user_agent=UA, viewport={"width": 1366, "height": 900})
+        sem = asyncio.Semaphore(PAGINAS_EN_PARALELO)
+        await asyncio.gather(*(_ficha_garage(ctx, sem, it) for it in items))
+        await browser.close()
+
+
+def revisar_garages(items: list[dict]) -> None:
+    """Completa item['garage'] (True/False/None/'error') de cada aviso."""
+    pendientes = []
+    for it in items:
+        if detectar_garage(it["text"]) is True:   # la tarjeta ya lo dice
+            it["garage"] = True
+        else:
+            pendientes.append(it)
+    if pendientes:
+        print(f"Revisando garage en {len(pendientes)} fichas...")
+        asyncio.run(_revisar_garages(pendientes))
+
+
+# ----------------------------------------------------------------------------
 # Telegram
 # ----------------------------------------------------------------------------
 def chat_ids() -> list[str]:
@@ -483,6 +561,9 @@ def format_item(item: dict) -> str:
         f"🏠 <b>{e(titulo)}</b>\n"
         f"💰 {e(precio)}  ·  🛏 {e(dorm_txt)}\n"
         + (f"📍 {e(lugar)}\n" if lugar else "")
+        + ("🚗 Con garage\n" if item.get("garage") is True
+           else "🚗 Garage no indicado\n" if "garage" in item and item["garage"] is None
+           else "")
         + f"🌐 {e(SITE_NAMES[item['sitio']])}\n"
         f"<a href=\"{e(item['url'], quote=True)}\">Ver aviso</a>"
     )
@@ -550,6 +631,22 @@ def main() -> None:
                           f"{len(de_s)} avisos que ya cumplen tus filtros. "
                           "Desde ahora te aviso de los nuevos.")
         nuevos = [n for n in nuevos if n["sitio"] not in sitios_nuevos]
+
+        # Garage obligatorio en los departamentos indicados en config.yaml.
+        con_garage = {norm(d) for d in (f.get("garage_obligatorio_en") or [])}
+        revisar = [n for n in nuevos if n["depto"] in con_garage]
+        if revisar:
+            revisar_garages(revisar)
+            si_garage_sin_dato = f.get("avisar_si_no_indica_garage", False)
+            antes = len(nuevos)
+            for n in revisar:
+                g = n.get("garage")
+                if g is True or (g is None and si_garage_sin_dato):
+                    continue
+                nuevos.remove(n)
+                if g != "error":          # si la ficha no abrió, se reintenta luego
+                    seen.add(n["id"])
+            print(f"Garage: {antes - len(nuevos)} descartados de {len(revisar)} revisados")
 
         limite = cfg.get("max_mensajes_por_ejecucion", 25)
         for it in nuevos[:limite]:

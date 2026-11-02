@@ -8,6 +8,12 @@ filtros:
   dormitorios_min: 2          # mínimo de dormitorios
   # Si un aviso no indica dormitorios, ¿avisar igual? (true = sí)
   avisar_si_no_indica_dormitorios: true
+  # Departamentos donde la propiedad TIENE que tener garage o cochera.
+  # El bot lo verifica entrando a la ficha de cada aviso nuevo.
+  garage_obligatorio_en:
+    - montevideo
+  # Si la ficha no dice nada sobre garage, ¿avisar igual? (true = sí)
+  avisar_si_no_indica_garage: true
   # Cotización aproximada para avisos publicados en pesos uruguayos
   cotizacion_usd_uyu: 40
 
