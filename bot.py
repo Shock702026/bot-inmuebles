@@ -54,7 +54,12 @@ SOLO_CIUDAD = {"remax"}
 # Inmobiliarias con una sola página de ventas (se recorren todas sus páginas).
 # El departamento indica dónde están sus propiedades, para el filtro de zonas.
 INMOBILIARIAS = {
-    "pbi": {"url": "https://pbiinmobiliaria.com/ventas", "depto": "maldonado"},
+    "pbi": {
+        "depto": "maldonado",
+        # {tipo} = casas / apartamentos ; {precio} = precio máximo en USD
+        "url": "https://puntaballenainmobiliaria.com/{tipo}-venta/"
+               "?periodo=0&precioMaximo={precio}&pagina=1",
+    },
 }
 LINK_PATTERNS["pbi"] = re.compile(
     r"(?:pbiinmobiliaria|puntaballenainmobiliaria)\.com(?::\d+)?/(?:Casa|Apartamento)/(\d+)", re.I)
@@ -82,7 +87,8 @@ ALIAS = {
     ],
     "pocitos": ["pocitos nuevo"],
     "punta ballena": ["las grutas", "lomo de la ballena", "club del lago",
-                      "tio tom", "rinconada", "sierra de la ballena"],
+                      "tio tom", "rinconada", "sierra de la ballena",
+                      "camino lussich", "lussich"],
     "laguna del sauce": ["la laguna del sauce"],
     "solanas": ["solana"],
 }
@@ -211,8 +217,10 @@ def build_searches(cfg: dict) -> list[dict]:
         if site in INMOBILIARIAS:
             inm = INMOBILIARIAS[site]
             if inm["depto"] in [norm(d) for d in (cfg.get("zonas") or {})]:
-                out.append({"site": site, "depto": inm["depto"], "zona": None,
-                            "url": inm["url"], "paginas": True})
+                for tipo in cfg.get("tipos") or ["casas", "apartamentos"]:
+                    out.append({"site": site, "depto": inm["depto"], "zona": None,
+                                "url": inm["url"].format(tipo=tipo, precio=precio_max),
+                                "paginas": True})
             continue
         for depto, zonas in (cfg.get("zonas") or {}).items():
             depto_n = norm(depto)
@@ -329,13 +337,15 @@ MAX_PAGINAS = 20
 PAGINAS_JS = r"""
 (base) => {
   const b = new URL(base);
+  const sinBarra = p => p.toLowerCase().replace(/\/+$/, '');
   const out = new Set();
   for (const a of document.querySelectorAll('a[href]')) {
     let u;
     try { u = new URL(a.href); } catch (e) { continue; }
-    if (u.host !== b.host || !u.pathname.toLowerCase().startsWith(b.pathname.toLowerCase())) continue;
+    // (el host puede variar: el sitio usa dos dominios)
+    if (!sinBarra(u.pathname).startsWith(sinBarra(b.pathname))) continue;
     const txt = (a.innerText || '').trim().toLowerCase();
-    const pag = /(pag|page|p)[=\/_-]?\d+/i.test(u.pathname + u.search);
+    const pag = /(pagina|pag|page|p)[=\/_-]?\d+/i.test(u.pathname + u.search);
     if (pag || /^\d{1,3}$/.test(txt) || /siguiente|next|›|»/.test(txt)) {
       u.hash = '';
       if (u.href !== b.href) out.add(u.href);
