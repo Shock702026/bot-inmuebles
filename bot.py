@@ -1,9 +1,10 @@
 """
 Bot de inmuebles en venta -> avisos por Telegram.
 
-Revisa Casas y Más, Mercado Libre, InfoCasas y Gallito en los barrios/zonas
-elegidos, filtra por precio y dormitorios, y manda por Telegram solo los
-avisos que no vio antes. Los avisos ya vistos se guardan en seen.json.
+Revisa Casas y Más, InfoCasas, Gallito, RE/MAX y Punta Ballena Inmobiliaria
+en los barrios/zonas elegidos, filtra por precio, tipo, dormitorios y garage,
+y manda por Telegram solo los avisos que no vio antes (sin repetir la misma
+propiedad publicada en varios portales). Los avisos ya vistos se guardan en seen.json.
 
 Variables de entorno necesarias:
   TELEGRAM_TOKEN    token del bot (te lo da @BotFather)
@@ -165,6 +166,25 @@ def detectar_depto(text: str, deptos: list[str]) -> str:
 TIPO_SINGULAR = {"casas": "casa", "apartamentos": "apartamento"}
 
 
+def tipos_de(cfg: dict, depto: str) -> list[str]:
+    """Tipos a buscar en un departamento (tipos_por_depto, o tipos general)."""
+    por = {norm(k): v for k, v in (cfg.get("tipos_por_depto") or {}).items()}
+    return por.get(norm(depto)) or cfg.get("tipos") or ["casas", "apartamentos"]
+
+
+def detectar_tipo(item: dict) -> str | None:
+    """casas / apartamentos según el link y el título del aviso; si no lo
+    dicen, el tipo de la búsqueda donde apareció."""
+    from urllib.parse import urlparse
+    for fuente in (norm(urlparse(item.get("url", "")).path.replace("-", " ")),
+                   norm(item.get("titulo") or "")):
+        if re.search(r"\b(apartamentos?|aptos?|departamentos?|monoambientes?|penthouse|duplex)\b", fuente):
+            return "apartamentos"
+        if re.search(r"\b(casas?|chalets?)\b", fuente):
+            return "casas"
+    return item.get("tipo_busqueda")
+
+
 def build_url(site: str, tipo: str, depto: str, zona: str | None, precio_max: int) -> str:
     z = f"/{slug(zona)}" if zona else ""
     d = slug(depto)
@@ -192,8 +212,9 @@ def _ciudad_searches(site: str, cfg: dict, precio_max: int) -> list[dict]:
         if depto == "maldonado" and (not zonas_n or "punta del este" in zonas_n):
             ciudades.append("punta del este")
         for ciudad in ciudades:
-            for tipo in cfg.get("tipos") or ["casas", "apartamentos"]:
+            for tipo in tipos_de(cfg, depto):
                 out.append({"site": site, "depto": depto, "zona": None, "estricto": True,
+                            "tipo": tipo,
                             "url": build_url(site, tipo, ciudad, None, precio_max)})
     if site == "remax":
         # Las 100 publicaciones de venta más recientes de todo el país.
@@ -217,17 +238,18 @@ def build_searches(cfg: dict) -> list[dict]:
         if site in INMOBILIARIAS:
             inm = INMOBILIARIAS[site]
             if inm["depto"] in [norm(d) for d in (cfg.get("zonas") or {})]:
-                for tipo in cfg.get("tipos") or ["casas", "apartamentos"]:
+                for tipo in tipos_de(cfg, inm["depto"]):
                     out.append({"site": site, "depto": inm["depto"], "zona": None,
+                                "tipo": tipo,
                                 "url": inm["url"].format(tipo=tipo, precio=precio_max),
                                 "paginas": True})
             continue
         for depto, zonas in (cfg.get("zonas") or {}).items():
             depto_n = norm(depto)
-            for tipo in cfg.get("tipos") or ["casas", "apartamentos"]:
+            for tipo in tipos_de(cfg, depto_n):
                 for zona in (zonas or [None]):
                     out.append({
-                        "site": site, "depto": depto_n, "zona": zona,
+                        "site": site, "depto": depto_n, "zona": zona, "tipo": tipo,
                         "url": build_url(site, tipo, depto_n, zona, precio_max),
                     })
     for site, urls in (cfg.get("busquedas_extra") or {}).items():
@@ -243,11 +265,13 @@ def build_searches(cfg: dict) -> list[dict]:
 _NUM = r"(\d{1,3}(?:[.,\s]\d{3})+|\d+(?:[.,]\d+)?)\s*(mil|k)?"
 USD_RE = re.compile(r"(?:U\$S|US\$|U\$D|USD|U\$|u\$s|US\s?\$)\s*" + _NUM, re.I)
 UYU_RE = re.compile(r"(?<![A-Za-z$])(?:\$U|UYU|\$)\s*" + _NUM)
-DORM_RES = [
-    re.compile(r"(\d+)\s*(?:dormitorios?|dorms?\b\.?)", re.I),
-    re.compile(r"dormitorios?\s*:?\s*(\d+)", re.I),
-    re.compile(r"(\d+)\s*(?:habitaciones|hab\.)", re.I),
-]
+# "2 dormitorios", "3 dorms." (número antes, misma línea)
+DORM_ANTES = re.compile(r"(\d{1,2})[ \t]*(?:dormitorios?|dorms?)\b", re.I)
+# "Dormitorios: 2", "Dormitorios\n2", "Dormitorios2" (etiqueta y valor)
+DORM_ETIQUETA = re.compile(r"dormitorios?(?:[ \t]*[:\n][ \t]*|)(\d{1,2})\b", re.I)
+# "Dormitorios 2" (etiqueta, espacio y número): ambiguo con "2 dormitorios 1 baño"
+DORM_ESPACIO = re.compile(r"dormitorios?[ \t]+(\d{1,2})\b(?![ \t]*[^\W\d_])", re.I)
+HAB_ANTES = re.compile(r"(\d{1,2})[ \t]*(?:habitaciones|hab\.)", re.I)
 
 
 def _to_number(raw: str, suffix: str | None) -> float:
@@ -275,16 +299,29 @@ def parse_price_usd(text: str, cotizacion: float) -> float | None:
     return None
 
 
-def parse_dorms(text: str) -> int | None:
+def parse_dorms(text: str, titulo: str = "") -> int | None:
+    """Dormitorios del aviso. None = no lo dice o es ambiguo (se mira la ficha)."""
+    if titulo:
+        m = DORM_ANTES.search(titulo)
+        if m:
+            return int(m.group(1))
+        if re.search(r"mono\s?ambiente", titulo, re.I):
+            return 0
+    m = DORM_ETIQUETA.search(text)
+    if m:
+        return int(m.group(1))
+    antes = {int(x) for x in DORM_ANTES.findall(text)}
+    espacio = {int(x) for x in DORM_ESPACIO.findall(text)}
+    if len(antes) == 1 and (not espacio or espacio == antes):
+        return antes.pop()
+    if not antes and len(espacio) == 1:
+        return espacio.pop()
+    if antes or espacio:
+        return None                       # números distintos: ambiguo
     if re.search(r"mono\s?ambiente", text, re.I):
         return 0
-    for rx in DORM_RES:
-        m = rx.search(text)
-        if m:
-            n = int(m.group(1))
-            if n < 30:
-                return n
-    return None
+    m = HAB_ANTES.search(text)
+    return int(m.group(1)) if m else None
 
 
 def passes_filters(item: dict, f: dict) -> bool:
@@ -293,7 +330,7 @@ def passes_filters(item: dict, f: dict) -> bool:
         return False
     dorms = item.get("dormitorios")
     if dorms is None:
-        return f.get("avisar_si_no_indica_dormitorios", True)
+        return True        # se decide después de mirar la ficha
     return dorms >= f["dormitorios_min"]
 
 
@@ -404,6 +441,7 @@ async def _scrape_one(ctx, sem, search: dict) -> list[dict]:
                 "depto": search["depto"],
                 "zona_busqueda": search["zona"],
                 "estricto": search.get("estricto", False),
+                "tipo_busqueda": search.get("tipo"),
             })
     print(f"  {SITE_NAMES[site]}: {len(items)} avisos en {search['url']}")
     return items
@@ -464,12 +502,14 @@ def detectar_garage(texto: str) -> bool | None:
 FICHA_JS = r"""
 () => {
   const m = document.querySelector('main, article, [class*=detail], [class*=Detail], [class*=propiedad]');
-  return ((m && m.innerText.length > 300 ? m.innerText : document.body.innerText) || '').slice(0, 30000);
+  const texto = ((m && m.innerText.length > 300 ? m.innerText : document.body.innerText) || '').slice(0, 30000);
+  const h1 = document.querySelector('h1');
+  return { texto, titulo: ((h1 && h1.innerText) || '') + ' | ' + (document.title || '') };
 }
 """
 
 
-async def _ficha_garage(ctx, sem, item: dict) -> None:
+async def _ficha(ctx, sem, item: dict) -> None:
     async with sem:
         page = await ctx.new_page()
         try:
@@ -478,15 +518,16 @@ async def _ficha_garage(ctx, sem, item: dict) -> None:
                 await page.wait_for_load_state("networkidle", timeout=8000)
             except Exception:
                 pass
-            item["garage"] = detectar_garage(await page.evaluate(FICHA_JS))
+            r = await page.evaluate(FICHA_JS)
+            item["ficha_texto"], item["ficha_titulo"] = r["texto"], r["titulo"]
         except Exception as e:
             print(f"  [!] No se pudo abrir la ficha {item['url']}: {e}")
-            item["garage"] = "error"
+            item["ficha_error"] = True
         finally:
             await page.close()
 
 
-async def _revisar_garages(items: list[dict]) -> None:
+async def _abrir_fichas(items: list[dict]) -> None:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
@@ -494,21 +535,65 @@ async def _revisar_garages(items: list[dict]) -> None:
         ctx = await browser.new_context(
             locale="es-UY", user_agent=UA, viewport={"width": 1366, "height": 900})
         sem = asyncio.Semaphore(PAGINAS_EN_PARALELO)
-        await asyncio.gather(*(_ficha_garage(ctx, sem, it) for it in items))
+        await asyncio.gather(*(_ficha(ctx, sem, it) for it in items))
         await browser.close()
 
 
-def revisar_garages(items: list[dict]) -> None:
-    """Completa item['garage'] (True/False/None/'error') de cada aviso."""
+def revisar_fichas(items: list[dict], con_garage: set[str]) -> None:
+    """Abre la ficha de los avisos a los que les falta un dato:
+    dormitorios (si la tarjeta no lo dice claro) y garage (en los
+    departamentos donde es obligatorio). Completa item['dormitorios'] e
+    item['garage'] (True / False / None)."""
     pendientes = []
     for it in items:
-        if detectar_garage(it["text"]) is True:   # la tarjeta ya lo dice
-            it["garage"] = True
-        else:
+        if it["depto"] in con_garage:
+            it["garage"] = True if detectar_garage(it["text"]) is True else None
+        falta_garage = it["depto"] in con_garage and it["garage"] is not True
+        if it.get("dormitorios") is None or falta_garage:
             pendientes.append(it)
-    if pendientes:
-        print(f"Revisando garage en {len(pendientes)} fichas...")
-        asyncio.run(_revisar_garages(pendientes))
+    if not pendientes:
+        return
+    print(f"Revisando {len(pendientes)} fichas...")
+    asyncio.run(_abrir_fichas(pendientes))
+    for it in pendientes:
+        if it.get("ficha_error"):
+            continue
+        if it.get("dormitorios") is None:
+            it["dormitorios"] = parse_dorms(it["ficha_texto"], it["ficha_titulo"])
+        if it["depto"] in con_garage and it["garage"] is not True:
+            it["garage"] = detectar_garage(it["ficha_texto"])
+
+
+# ----------------------------------------------------------------------------
+# Avisos repetidos en distintos portales
+# ----------------------------------------------------------------------------
+DIAS_MEMORIA_REPETIDOS = 60
+
+
+def huella(item: dict) -> str | None:
+    """Misma propiedad publicada en varios portales: mismo departamento, tipo,
+    precio (en miles) y dormitorios; en Montevideo además el mismo barrio."""
+    precio, dorms = item.get("precio_usd"), item.get("dormitorios")
+    if not precio or dorms is None:
+        return None
+    partes = [item["depto"], item.get("tipo") or "", str(round(precio / 1000)), str(dorms)]
+    if item["depto"] == "montevideo":
+        partes.append(norm(item.get("zona_busqueda") or ""))
+    return "|".join(partes)
+
+
+def leer_huellas(seen: set[str]) -> dict[str, str]:
+    """En seen.json las huellas se guardan como 'fp:<huella>@<fecha>'."""
+    from datetime import date, timedelta
+    limite = (date.today() - timedelta(days=DIAS_MEMORIA_REPETIDOS)).isoformat()
+    huellas = {}
+    for x in [x for x in seen if x.startswith("fp:")]:
+        h, _, fecha = x[3:].rpartition("@")
+        if fecha >= limite:
+            huellas[h] = fecha
+        else:
+            seen.discard(x)            # olvida huellas viejas
+    return huellas
 
 
 # ----------------------------------------------------------------------------
@@ -573,11 +658,14 @@ def format_item(item: dict) -> str:
 # Principal
 # ----------------------------------------------------------------------------
 def main() -> None:
+    from datetime import date
     cfg = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
     f = cfg["filtros"]
     zonas = {norm(d): z or [] for d, z in (cfg.get("zonas") or {}).items()}
     first_run = not SEEN_FILE.exists()
     seen: set[str] = set() if first_run else set(json.loads(SEEN_FILE.read_text()))
+    huellas = leer_huellas(seen)
+    hoy = date.today().isoformat()
 
     searches = build_searches(cfg)
     # Portales que todavía no tienen nada en la memoria = recién agregados.
@@ -586,29 +674,48 @@ def main() -> None:
     print(f"Revisando {len(searches)} búsquedas...")
     items = scrape(searches)
 
+    # Si se subió el presupuesto, los avisos ya vistos que antes quedaban
+    # afuera por precio se vuelven a evaluar (una sola vez cada uno).
+    anterior = f.get("precio_max_anterior_usd")
+
+    def reconsiderar(it) -> bool:
+        if not anterior or f"re:{it['id']}" in seen:
+            return False
+        p = parse_price_usd(it["text"], f["cotizacion_usd_uyu"])
+        return p is not None and anterior < p <= f["precio_max_usd"]
+
+    def descartar(it) -> None:
+        seen.add(it["id"])
+        if it.get("reconsiderado"):
+            seen.add(f"re:{it['id']}")
+
     nuevos: list[dict] = []
     for it in items:
         if it["id"] in seen:
-            continue
+            if not reconsiderar(it):
+                continue
+            it["reconsiderado"] = True
         it["precio_usd"] = parse_price_usd(it["text"], f["cotizacion_usd_uyu"])
-        it["dormitorios"] = parse_dorms(it["text"])
+        it["dormitorios"] = parse_dorms(it["text"], it.get("titulo", ""))
         if not it["depto"]:
             it["depto"] = detectar_depto(it["text"], list(zonas))
+        it["tipo"] = detectar_tipo(it)
         en_zona = bool(it["depto"]) and zona_ok(
             it["text"], it["depto"], zonas.get(it["depto"], []), it.get("estricto", False))
+        tipo_ok = bool(it["depto"]) and it["tipo"] in tipos_de(cfg, it["depto"])
         if en_zona and not it.get("zona_busqueda"):
             t = norm(it["text"])
             it["zona_busqueda"] = next(
                 (z for z in zonas.get(it["depto"], [])
                  if any(_contains(t, a) for a in [norm(z), *ALIAS.get(norm(z), [])])), None)
-        if passes_filters(it, f) and en_zona:
+        if passes_filters(it, f) and en_zona and tipo_ok:
             nuevos.append(it)
         else:
-            seen.add(it["id"])
+            descartar(it)
 
     por_sitio = {SITE_NAMES[s]: sum(1 for i in items if i["sitio"] == s)
                  for s in {x["site"] for x in searches}}
-    print(f"Avisos leídos: {len(items)} {por_sitio} · nuevos que cumplen filtros: {len(nuevos)}")
+    print(f"Avisos leídos: {len(items)} {por_sitio} · candidatos: {len(nuevos)}")
 
     if first_run:
         # Primera vez: registra lo que ya existe sin inundarte de mensajes.
@@ -632,31 +739,49 @@ def main() -> None:
                           "Desde ahora te aviso de los nuevos.")
         nuevos = [n for n in nuevos if n["sitio"] not in sitios_nuevos]
 
-        # Garage obligatorio en los departamentos indicados en config.yaml.
+        # Fichas: dormitorios que la tarjeta no aclara y garage obligatorio.
         con_garage = {norm(d) for d in (f.get("garage_obligatorio_en") or [])}
-        revisar = [n for n in nuevos if n["depto"] in con_garage]
-        if revisar:
-            revisar_garages(revisar)
-            si_garage_sin_dato = f.get("avisar_si_no_indica_garage", False)
-            antes = len(nuevos)
-            for n in revisar:
+        revisar_fichas(nuevos, con_garage)
+        sin_dorms_ok = f.get("avisar_si_no_indica_dormitorios", False)
+        sin_garage_ok = f.get("avisar_si_no_indica_garage", False)
+        finales = []
+        for n in nuevos:
+            if n.get("ficha_error"):
+                continue                   # la ficha no abrió: se reintenta luego
+            d = n.get("dormitorios")
+            if (d is None and not sin_dorms_ok) or (d is not None and d < f["dormitorios_min"]):
+                descartar(n)
+                continue
+            if n["depto"] in con_garage:
                 g = n.get("garage")
-                if g is True or (g is None and si_garage_sin_dato):
+                if g is False or (g is None and not sin_garage_ok):
+                    descartar(n)
                     continue
-                nuevos.remove(n)
-                if g != "error":          # si la ficha no abrió, se reintenta luego
-                    seen.add(n["id"])
-            print(f"Garage: {antes - len(nuevos)} descartados de {len(revisar)} revisados")
+            finales.append(n)
+        print(f"Tras revisar fichas: {len(finales)} de {len(nuevos)}")
 
+        # Repetidos: la misma propiedad publicada en otro portal.
         limite = cfg.get("max_mensajes_por_ejecucion", 25)
-        for it in nuevos[:limite]:
+        enviados = repetidos = 0
+        pendientes = 0
+        for it in finales:
+            h = huella(it)
+            if h and h in huellas:
+                repetidos += 1
+                descartar(it)
+                continue
+            if enviados >= limite:
+                pendientes += 1
+                continue
             send_telegram(format_item(it))
-            seen.add(it["id"])
-        if len(nuevos) > limite:
-            send_telegram(
-                f"➕ Hay {len(nuevos) - limite} avisos nuevos más; "
-                "te los mando en la próxima revisión."
-            )
+            enviados += 1
+            descartar(it)                 # queda registrado como visto
+            if h:
+                huellas[h] = hoy
+        print(f"Enviados: {enviados} · repetidos omitidos: {repetidos}")
+        if pendientes:
+            send_telegram(f"➕ Hay {pendientes} avisos nuevos más; "
+                          "te los mando en la próxima revisión.")
 
     if not items:
         send_telegram(
@@ -664,6 +789,8 @@ def main() -> None:
             "Puede que algún portal haya cambiado o bloqueado el acceso."
         )
 
+    seen = {x for x in seen if not x.startswith("fp:")}
+    seen.update(f"fp:{h}@{d}" for h, d in huellas.items())
     SEEN_FILE.write_text(json.dumps(sorted(seen), indent=0), encoding="utf-8")
 
 

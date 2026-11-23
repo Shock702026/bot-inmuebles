@@ -4,10 +4,13 @@
 # ==========================================================
 
 filtros:
-  precio_max_usd: 200000      # precio máximo en dólares
-  dormitorios_min: 2          # mínimo de dormitorios
-  # Si un aviso no indica dormitorios, ¿avisar igual? (true = sí)
-  avisar_si_no_indica_dormitorios: true
+  precio_max_usd: 230000      # precio máximo en dólares
+  # Precio máximo anterior: los avisos ya vistos entre este valor y el nuevo
+  # se vuelven a revisar una vez (para no perder los que antes quedaban afuera).
+  precio_max_anterior_usd: 200000
+  dormitorios_min: 2          # mínimo de dormitorios (Montevideo y Maldonado)
+  # Si ni la tarjeta ni la ficha dicen los dormitorios, ¿avisar igual? (false = no)
+  avisar_si_no_indica_dormitorios: false
   # Departamentos donde la propiedad TIENE que tener garage o cochera.
   # El bot lo verifica entrando a la ficha de cada aviso nuevo.
   garage_obligatorio_en:
@@ -17,10 +20,13 @@ filtros:
   # Cotización aproximada para avisos publicados en pesos uruguayos
   cotizacion_usd_uyu: 40
 
-# Tipos de inmueble a buscar: casas, apartamentos
-tipos:
-  - casas
-  - apartamentos
+# Tipos de inmueble a buscar en cada departamento: casas, apartamentos
+tipos_por_depto:
+  montevideo:
+    - casas
+    - apartamentos
+  maldonado:
+    - casas                   # en Maldonado solo casas
 
 # ----------------------------------------------------------
 #  Zonas por departamento.
