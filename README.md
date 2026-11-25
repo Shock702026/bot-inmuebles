@@ -103,3 +103,20 @@ y 18 hs.
 > 60 días. Como el bot guarda `seen.json` en cada revisión, normalmente se
 > mantiene activo solo; si alguna vez se pausa, reactivalo desde la pestaña
 > **Actions**.
+
+---
+
+## 🔨 Bot de remates (casas y terrenos en Maldonado)
+
+`remates.py` revisa **una vez por día (8:50 de Uruguay)** dos fuentes:
+
+- **rematadores.com**: categoría Inmuebles.
+- **IMPO** (remates publicados en el Diario Oficial): sección Maldonado.
+
+Avisa por el mismo Telegram cada remate **nuevo** de una casa o un terreno
+(también solares, chacras y fracciones) en Maldonado. Si el mismo remate
+aparece en las dos fuentes, llega una sola vez: se reconoce por la fecha, la
+hora y el rematador. Los remates suspendidos no se avisan.
+
+Se ejecuta a mano desde **Actions → Bot de remates → Run workflow**.
+Su memoria se guarda en `remates_seen.json`.
