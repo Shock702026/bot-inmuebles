@@ -1,0 +1,85 @@
+{
+"ids": [
+"32888",
+"32899",
+"32936",
+"32937",
+"32966",
+"32982",
+"32984",
+"impo:28317-2026",
+"impo:29702-2026"
+],
+"enviados": [
+{
+"f": "2026-11-24",
+"h": "14:00",
+"a": [
+"constantino",
+"palermo",
+"suarez"
+],
+"t": "terreno"
+},
+{
+"f": "2026-11-26",
+"h": "14:30",
+"a": [
+"dante",
+"gustavo",
+"iocco"
+],
+"t": "terreno con casa"
+},
+{
+"f": "2026-12-02",
+"h": "14:00",
+"a": [
+"alvarez",
+"alzugaray",
+"gustavo"
+],
+"t": "terreno"
+},
+{
+"f": "2026-12-03",
+"h": "15:00",
+"a": [
+"mesa",
+"rossell",
+"tasaciones"
+],
+"t": "terreno"
+},
+{
+"f": "2026-12-09",
+"h": "14:00",
+"a": [
+"gonzalez",
+"grunullu",
+"paola",
+"vanesa"
+],
+"t": "casa"
+},
+{
+"f": "2026-12-09",
+"h": "14:00",
+"a": [
+"aizpun",
+"apolo",
+"hector",
+"orlando"
+],
+"t": "terreno con casa"
+},
+{
+"f": "2026-12-10",
+"h": "13:30",
+"a": [
+"assad"
+],
+"t": "casa"
+}
+]
+}
