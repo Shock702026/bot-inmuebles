@@ -1,9 +1,6 @@
 name: Bot de inmuebles
 
 on:
-  schedule:
-    # Horario en UTC. 12:05 y 22:05 UTC = 9:05 y 19:05 en Uruguay.
-    - cron: "5 12,22 * * *"
   workflow_dispatch: {}   # permite ejecutarlo a mano desde la pestaña Actions
 
 permissions:

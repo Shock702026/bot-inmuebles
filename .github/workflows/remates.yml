@@ -1,9 +1,6 @@
 name: Bot de remates
 
 on:
-  schedule:
-    # Todos los días a las 8:50 de Uruguay (11:50 UTC).
-    - cron: "50 11 * * *"
   workflow_dispatch: {}   # permite ejecutarlo a mano desde la pestaña Actions
 
 permissions:
