@@ -265,7 +265,8 @@ def cargar_memoria() -> dict:
     return data
 
 
-def main() -> None:
+def main() -> int:
+    """Revisa las fuentes de remates y avisa. Devuelve cuántos avisos mandó."""
     from datetime import date, timedelta
     primera_vez = not SEEN_FILE.exists()
     mem = cargar_memoria()
@@ -310,6 +311,7 @@ def main() -> None:
     print(f"Casas/terrenos en Maldonado: {len(elegidos)} · avisados ahora: {nuevos}")
     SEEN_FILE.write_text(json.dumps({"ids": sorted(seen), "enviados": enviados},
                                     indent=0, ensure_ascii=False), encoding="utf-8")
+    return nuevos
 
 
 if __name__ == "__main__":

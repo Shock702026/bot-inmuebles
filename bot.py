@@ -657,8 +657,10 @@ def format_item(item: dict) -> str:
 # ----------------------------------------------------------------------------
 # Principal
 # ----------------------------------------------------------------------------
-def main() -> None:
+def main() -> int:
+    """Revisa los portales y avisa. Devuelve cuántos avisos mandó."""
     from datetime import date
+    enviados = 0
     cfg = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
     f = cfg["filtros"]
     zonas = {norm(d): z or [] for d, z in (cfg.get("zonas") or {}).items()}
@@ -792,6 +794,7 @@ def main() -> None:
     seen = {x for x in seen if not x.startswith("fp:")}
     seen.update(f"fp:{h}@{d}" for h, d in huellas.items())
     SEEN_FILE.write_text(json.dumps(sorted(seen), indent=0), encoding="utf-8")
+    return enviados
 
 
 if __name__ == "__main__":
