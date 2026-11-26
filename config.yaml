@@ -65,7 +65,7 @@ portales:
 
 # Máximo de avisos que se mandan por Telegram en cada revisión.
 # Si hay más, el resto llega en la revisión siguiente.
-max_mensajes_por_ejecucion: 25
+max_mensajes_por_ejecucion: 50
 
 # ----------------------------------------------------------
 #  (Opcional) Búsquedas extra con URLs copiadas del navegador.

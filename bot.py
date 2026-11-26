@@ -272,6 +272,16 @@ DORM_ETIQUETA = re.compile(r"dormitorios?(?:[ \t]*[:\n][ \t]*|)(\d{1,2})\b", re.
 # "Dormitorios 2" (etiqueta, espacio y número): ambiguo con "2 dormitorios 1 baño"
 DORM_ESPACIO = re.compile(r"dormitorios?[ \t]+(\d{1,2})\b(?![ \t]*[^\W\d_])", re.I)
 HAB_ANTES = re.compile(r"(\d{1,2})[ \t]*(?:habitaciones|hab\.)", re.I)
+# En la dirección del aviso: ".../venta-apartamento-pocitos-2-dormitorios-..."
+DORM_URL = re.compile(r"(?<![\d])(\d{1,2})-dorm(?:itorios?|s)?\b", re.I)
+# En letras: "dos dormitorios", "un dormitorio"
+NUM_LETRAS = {"un": 1, "uno": 1, "una": 1, "dos": 2, "tres": 3, "cuatro": 4,
+              "cinco": 5, "seis": 6}
+DORM_LETRAS = re.compile(r"\b(un|uno|una|dos|tres|cuatro|cinco|seis)[ \t]+dormitorios?\b", re.I)
+# Fichas con el número ARRIBA de la palabra ("2\ndormitorios\n1\nbaños") o
+# ABAJO ("Dormitorios\n2\nBaños\n1"): se reconoce mirando también los baños.
+DORM_ARRIBA = re.compile(r"(?:^|\n)[ \t]*(\d{1,2})[ \t]*\n[ \t]*dormitorios?[ \t]*\n[ \t]*\d{1,2}[ \t]*\n[ \t]*baños?\b", re.I)
+DORM_ABAJO = re.compile(r"dormitorios?[ \t]*\n[ \t]*(\d{1,2})[ \t]*\n[ \t]*baños?[ \t]*\n[ \t]*\d{1,2}[ \t]*(?:\n|$)", re.I)
 
 
 def _to_number(raw: str, suffix: str | None) -> float:
@@ -299,25 +309,55 @@ def parse_price_usd(text: str, cotizacion: float) -> float | None:
     return None
 
 
-def parse_dorms(text: str, titulo: str = "") -> int | None:
-    """Dormitorios del aviso. None = no lo dice o es ambiguo (se mira la ficha)."""
-    if titulo:
-        m = DORM_ANTES.search(titulo)
-        if m:
-            return int(m.group(1))
-        if re.search(r"mono\s?ambiente", titulo, re.I):
-            return 0
-    m = DORM_ETIQUETA.search(text)
+def _dorms_de_texto_corto(t: str) -> int | None:
+    """Título o frase: "2 dormitorios", "dos dormitorios", "monoambiente"."""
+    m = DORM_ANTES.search(t)
     if m:
         return int(m.group(1))
+    m = DORM_LETRAS.search(t)
+    if m:
+        return NUM_LETRAS[m.group(1).lower()]
+    if re.search(r"mono\s?ambiente", t, re.I):
+        return 0
+    return None
+
+
+def parse_dorms(text: str, titulo: str = "", url: str = "") -> int | None:
+    """Dormitorios del aviso. None = no lo dice o es ambiguo (se mira la ficha)."""
+    # 1) La dirección del aviso (Gallito, Casas y Más la incluyen)
+    if url:
+        from urllib.parse import urlparse
+        ruta = urlparse(url).path
+        m = DORM_URL.search(ruta)
+        if m:
+            return int(m.group(1))
+        if re.search(r"mono-?ambiente", ruta, re.I):
+            return 0
+    # 2) El título
+    if titulo:
+        d = _dorms_de_texto_corto(titulo)
+        if d is not None:
+            return d
+    # 3) El texto: primero lo que está en una misma línea ("3 Dorms.", "2 dormitorios")
     antes = {int(x) for x in DORM_ANTES.findall(text)}
-    espacio = {int(x) for x in DORM_ESPACIO.findall(text)}
-    if len(antes) == 1 and (not espacio or espacio == antes):
-        return antes.pop()
-    if not antes and len(espacio) == 1:
-        return espacio.pop()
-    if antes or espacio:
-        return None                       # números distintos: ambiguo
+    letras = {NUM_LETRAS[x.lower()] for x in DORM_LETRAS.findall(text)}
+    pegado = {int(x) for x in re.findall(r"dormitorios?(\d{1,2})(?!\d)", text, re.I)}  # "Dormitorios3"
+    espacio = {int(x) for x in DORM_ESPACIO.findall(text)}                         # "Dormitorios 3"
+    misma_linea = antes | letras | pegado | espacio
+    if len(misma_linea) == 1:
+        return misma_linea.pop()
+    # 4) Fichas en columnas: número arriba o abajo de la palabra
+    arriba = {int(x) for x in DORM_ARRIBA.findall(text)}
+    abajo = {int(x) for x in DORM_ABAJO.findall(text)}
+    if arriba and not abajo and len(arriba) == 1:
+        return arriba.pop()
+    if abajo and not arriba and len(abajo) == 1:
+        return abajo.pop()
+    m = re.search(r"dormitorios?[ \t]*:[ \t]*(\d{1,2})\b", text, re.I)   # "Dormitorios: 2"
+    if m:
+        return int(m.group(1))
+    if misma_linea or arriba or abajo:
+        return None                       # datos que no coinciden: ambiguo
     if re.search(r"mono\s?ambiente", text, re.I):
         return 0
     m = HAB_ANTES.search(text)
@@ -559,7 +599,7 @@ def revisar_fichas(items: list[dict], con_garage: set[str]) -> None:
         if it.get("ficha_error"):
             continue
         if it.get("dormitorios") is None:
-            it["dormitorios"] = parse_dorms(it["ficha_texto"], it["ficha_titulo"])
+            it["dormitorios"] = parse_dorms(it["ficha_texto"], it["ficha_titulo"], it.get("url", ""))
         if it["depto"] in con_garage and it["garage"] is not True:
             it["garage"] = detectar_garage(it["ficha_texto"])
 
@@ -698,7 +738,7 @@ def main() -> int:
                 continue
             it["reconsiderado"] = True
         it["precio_usd"] = parse_price_usd(it["text"], f["cotizacion_usd_uyu"])
-        it["dormitorios"] = parse_dorms(it["text"], it.get("titulo", ""))
+        it["dormitorios"] = parse_dorms(it["text"], it.get("titulo", ""), it.get("url", ""))
         if not it["depto"]:
             it["depto"] = detectar_depto(it["text"], list(zonas))
         it["tipo"] = detectar_tipo(it)
